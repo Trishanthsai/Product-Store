@@ -1,8 +1,13 @@
 name: CI
 
 on:
+  push:
+    branches: [main, develop]
   pull_request:
-    branches: [main]
+    branches: [main, develop]
+
+permissions:
+  contents: read
 
 jobs:
   build-and-lint:
@@ -74,6 +79,47 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
+      - name: Build e2e Docker image
+        run: docker build -f Dockerfile.e2e -t playwright-e2e .
+
+      - name: Run Playwright tests in container
+        run: |
+          mkdir -p playwright-report
+          docker run --rm \
+            --network host \
+            -e MONGO_URI \
+            -e JWT_SECRET \
+            -e NODE_ENV \
+            -e PORT \
+            -e VITE_API_URL \
+            -e FRONTEND_URL \
+            -v ${{ github.workspace }}/playwright-report:/app/playwright-report \
+            playwright-e2e
+
+      - name: Upload Playwright report
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: playwright-report
+          path: playwright-report/
+          retention-days: 30
+
+  deploy:
+    name: Deploy to ${{ github.ref == 'refs/heads/main' && 'Production' || 'Staging' }}
+    needs: [build-and-lint, e2e-tests]
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop')
+    runs-on: ubuntu-latest
+    concurrency:
+      group: deploy-${{ github.ref }}
+      cancel-in-progress: true
+    environment: ${{ github.ref == 'refs/heads/main' && 'production' || 'staging' }}
+    env:
+      VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+      VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
@@ -84,31 +130,14 @@ jobs:
             FRONTEND/package-lock.json
             BACKEND/package-lock.json
 
-      - name: Install root dependencies
-        run: npm ci
+      - name: Install Vercel CLI
+        run: npm install --global vercel@54.18.7
 
-      - name: Install frontend dependencies
-        run: npm ci
-        working-directory: FRONTEND
+      - name: Pull Vercel Environment Information
+        run: vercel pull --yes --environment=${{ github.ref == 'refs/heads/main' && 'production' || 'preview' }} --token=${{ secrets.VERCEL_TOKEN }}
 
-      - name: Install backend dependencies
-        run: npm ci
-        working-directory: BACKEND
+      - name: Build Project Artifacts
+        run: vercel build ${{ github.ref == 'refs/heads/main' && '--prod' || '' }} --token=${{ secrets.VERCEL_TOKEN }}
 
-      - name: Install Playwright Browsers
-        run: npx playwright install --with-deps
-
-      - name: Build frontend
-        run: npm run build
-        working-directory: FRONTEND
-
-      - name: Run Playwright tests
-        run: npx playwright test
-
-      - name: Upload Playwright report
-        uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: playwright-report
-          path: playwright-report/
-          retention-days: 30
+      - name: Deploy Project Artifacts to Vercel
+        run: vercel deploy --prebuilt ${{ github.ref == 'refs/heads/main' && '--prod' || '' }} --token=${{ secrets.VERCEL_TOKEN }}

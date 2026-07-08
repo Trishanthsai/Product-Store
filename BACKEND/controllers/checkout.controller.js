@@ -1,9 +1,12 @@
 import Product from '../models/product.model.js';
 import Order from '../models/order.model.js';
+import User from '../models/user.model.js';
 import Coupon from '../models/coupon.model.js';
 import mongoose from 'mongoose';
 import Stripe from 'stripe';
+import { sendOrderConfirmationEmail } from '../services/email.service.js';
 import { processReferralOnPurchase } from '../services/referral.service.js';
+import { getIO } from '../socket.js';
 
 let stripe;
 if (process.env.NODE_ENV === 'test') {
@@ -203,7 +206,8 @@ export const stripeWebhook = async (req, res) => {
               isDeleted: { $ne: true },
               baseStock: { $gte: item.quantity },
             },
-            { $inc: { baseStock: -item.quantity } }
+            { $inc: { baseStock: -item.quantity } },
+            { new: true }
           );
 
           if (!updated) {
@@ -211,6 +215,12 @@ export const stripeWebhook = async (req, res) => {
             await restoreStock(deductions);
             return res.json({ received: true });
           }
+
+          // Emit real-time stock update
+          getIO()?.emit("stockUpdate", {
+            productId: item._id,
+            newStock: updated.baseStock
+          });
 
           deductions.push({ productId: item._id, quantity: item.quantity });
         }
@@ -222,6 +232,22 @@ export const stripeWebhook = async (req, res) => {
           stripeSessionId: session.id,
           paymentStatus: "completed",
         });
+
+        // Send confirmation email — non-blocking; failures never break fulfillment
+        const customerEmail = session.customer_details?.email;
+        if (customerEmail) {
+          sendOrderConfirmationEmail(customerEmail, order).catch((err) =>
+            console.error('[Email] Order confirmation failed:', err.message)
+          );
+        } else if (session.metadata?.userId) {
+          User.findById(session.metadata.userId).select('email').lean().then((u) => {
+            if (u?.email) {
+              sendOrderConfirmationEmail(u.email, order).catch((err) =>
+                console.error('[Email] Order confirmation failed:', err.message)
+              );
+            }
+          }).catch(() => {});
+        }
 
         // Increment coupon usage after successful fulfillment
         if (session.metadata?.couponCode) {
