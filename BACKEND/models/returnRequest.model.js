@@ -50,7 +50,7 @@ const returnRequestSchema = new mongoose.Schema({
     type: [returnItemSchema],
     required: [true, "At least one return item is required"],
     validate: { 
-      validator: function (v: any[]) {
+      validator: function (v) {
         return v && v.length > 0;
       },
       message: "Items array cannot be empty",
